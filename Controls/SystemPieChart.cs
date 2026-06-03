@@ -10,10 +10,10 @@ public sealed class SystemPieChart : Control
     {
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw, true);
-        BackColor = Color.FromArgb(28, 29, 32);
-        ForeColor = Color.FromArgb(238, 239, 241);
-        MutedColor = Color.FromArgb(169, 174, 181);
-        BorderColor = Color.FromArgb(55, 57, 62);
+        BackColor = Color.FromArgb(30, 36, 44);
+        ForeColor = Color.FromArgb(242, 245, 248);
+        MutedColor = Color.FromArgb(154, 164, 177);
+        BorderColor = Color.FromArgb(55, 66, 80);
         CenterText = "0%";
         SubText = "System pressure";
     }
@@ -59,7 +59,7 @@ public sealed class SystemPieChart : Control
             return;
         }
 
-        var chartSize = Math.Min(Height - 58, Math.Max(120, (int)(Width * 0.48)));
+        var chartSize = Math.Min(Height - 58, Math.Max(130, (int)(Width * 0.48)));
         chartSize = Math.Min(chartSize, Math.Min(Width - 32, Height - 44));
         var chartBounds = new Rectangle(18, (Height - chartSize) / 2, chartSize, chartSize);
 

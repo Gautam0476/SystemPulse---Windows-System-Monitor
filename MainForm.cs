@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
 using CustomTaskManager.Controls;
 using CustomTaskManager.Models;
 using CustomTaskManager.Services;
@@ -9,14 +10,23 @@ namespace CustomTaskManager;
 
 public sealed class MainForm : Form
 {
-    private static readonly Color WindowBack = Color.FromArgb(18, 18, 20);
-    private static readonly Color PanelBack = Color.FromArgb(28, 29, 32);
-    private static readonly Color HeaderBack = Color.FromArgb(35, 36, 40);
-    private static readonly Color Border = Color.FromArgb(55, 57, 62);
-    private static readonly Color TextColor = Color.FromArgb(238, 239, 241);
-    private static readonly Color MutedText = Color.FromArgb(169, 174, 181);
-    private static readonly Color Accent = Color.FromArgb(42, 157, 143);
-    private static readonly Color Danger = Color.FromArgb(198, 73, 70);
+    private static Color WindowBack = Color.FromArgb(14, 17, 21);
+    private static Color PanelBack = Color.FromArgb(23, 27, 33);
+    private static Color SurfaceBack = Color.FromArgb(30, 36, 44);
+    private static Color HeaderBack = Color.FromArgb(19, 23, 29);
+    private static Color Border = Color.FromArgb(55, 66, 80);
+    private static Color TextColor = Color.FromArgb(242, 245, 248);
+    private static Color MutedText = Color.FromArgb(154, 164, 177);
+    private static Color Accent = Color.FromArgb(0, 179, 167);
+    private static Color AccentDark = Color.FromArgb(20, 126, 119);
+    private static Color Danger = Color.FromArgb(224, 82, 82);
+    private static Color GridAlternateBack = Color.FromArgb(27, 32, 39);
+    private const int ThemeToggleWidth = 148;
+    private const int ThemeToggleHeight = 48;
+    private const double SmartAlertCpuThreshold = 85d;
+    private const double SmartAlertMemoryThreshold = 85d;
+    private const int SmartAlertRequiredSamples = 4;
+    private static readonly TimeSpan SmartAlertCooldown = TimeSpan.FromMinutes(2);
 
     private readonly ProcessMonitor _processMonitor = new();
     private readonly StartupManager _startupManager = new();
@@ -24,33 +34,49 @@ public sealed class MainForm : Form
     private readonly RuleEngine _ruleEngine = new();
     private readonly HistoryStore _historyStore = new();
     private readonly SystemPerformanceMonitor _performanceMonitor = new();
+    private readonly ProcessAdvisor _processAdvisor = new();
     private readonly DashboardState _dashboardState = new();
     private readonly DashboardServer _dashboardServer;
+    private readonly NotifyIcon _notifyIcon = new();
 
     private readonly BindingSource _processSource = new();
     private readonly BindingSource _startupSource = new();
     private readonly BindingSource _rulesSource = new();
     private readonly BindingSource _historySource = new();
     private readonly BindingList<AutomationRule> _rules;
-    private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 2000 };
+    private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 3000 };
+    private readonly System.Windows.Forms.Timer _themeAnimationTimer = new() { Interval = 15 };
 
     private List<ProcessSnapshot> _snapshots = [];
     private DateTime _lastHistoryWriteUtc = DateTime.MinValue;
     private bool _refreshingProcesses;
+    private bool _isLightTheme;
+    private float _themeToggleProgress;
+    private float _themeToggleTargetProgress;
+    private string _processTreeSignature = string.Empty;
+    private int _highCpuSamples;
+    private int _highMemorySamples;
+    private DateTime _lastSmartAlertUtc = DateTime.MinValue;
     private Guid? _editingRuleId;
 
     private Label _summaryLabel = null!;
+    private Label _advisorTitleLabel = null!;
+    private Label _advisorDetailsLabel = null!;
     private TextBox _searchBox = null!;
     private Button _killButton = null!;
     private Button _openLocationButton = null!;
+    private Button _themeButton = null!;
+    private Button _selectAdvisorButton = null!;
     private TreeView _processTree = null!;
     private DataGridView _processGrid = null!;
     private Label _dashboardUrlLabel = null!;
     private Button _openDashboardButton = null!;
     private PerformanceGraph _cpuGraph = null!;
     private PerformanceGraph _memoryGraph = null!;
+    private PerformanceGraph _gpuGraph = null!;
     private Label _performanceCpuLabel = null!;
     private Label _performanceMemoryLabel = null!;
+    private Label _performanceGpuLabel = null!;
     private Label _performanceBatteryLabel = null!;
     private Label _performancePowerLabel = null!;
     private Label _performanceProcessesLabel = null!;
@@ -88,6 +114,7 @@ public sealed class MainForm : Form
         _rules = _ruleStore.Load();
 
         BuildUi();
+        ConfigureNotifications();
         WireEvents();
 
         _rulesSource.DataSource = _rules;
@@ -95,7 +122,6 @@ public sealed class MainForm : Form
 
         RefreshStartupEntries();
         RefreshHistory();
-        RefreshProcesses();
         _refreshTimer.Start();
     }
 
@@ -109,7 +135,7 @@ public sealed class MainForm : Form
         Size = new Size(1360, 820);
         BackColor = WindowBack;
         ForeColor = TextColor;
-        Font = new Font("Segoe UI", 9F);
+        Font = new Font("Segoe UI", 9.25F);
 
         var root = new TableLayoutPanel
         {
@@ -118,16 +144,24 @@ public sealed class MainForm : Form
             ColumnCount = 1,
             BackColor = WindowBack
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 126));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
 
         root.Controls.Add(BuildHeader(), 0, 0);
 
         var tabs = new TabControl
         {
-            Dock = DockStyle.Fill
+            Dock = DockStyle.Fill,
+            Appearance = TabAppearance.FlatButtons,
+            BackColor = WindowBack,
+            DrawMode = TabDrawMode.OwnerDrawFixed,
+            ItemSize = new Size(148, 38),
+            Padding = new Point(14, 6),
+            SizeMode = TabSizeMode.Fixed
         };
+        tabs.DrawItem += DrawMainTab;
+        tabs.SelectedIndexChanged += (_, _) => tabs.Invalidate();
         tabs.TabPages.Add(BuildProcessesTab());
         tabs.TabPages.Add(BuildPerformanceTab());
         tabs.TabPages.Add(BuildStartupTab());
@@ -150,6 +184,39 @@ public sealed class MainForm : Form
         ResumeLayout();
     }
 
+    private void DrawMainTab(object? sender, DrawItemEventArgs e)
+    {
+        if (sender is not TabControl tabs)
+        {
+            return;
+        }
+
+        var selected = e.Index == tabs.SelectedIndex;
+        var bounds = tabs.GetTabRect(e.Index);
+        bounds.Inflate(-2, -2);
+
+        using var background = new SolidBrush(selected ? SurfaceBack : HeaderBack);
+        e.Graphics.FillRectangle(background, bounds);
+
+        if (selected)
+        {
+            using var accentBrush = new SolidBrush(Accent);
+            e.Graphics.FillRectangle(accentBrush, bounds.Left, bounds.Bottom - 3, bounds.Width, 3);
+        }
+
+        using var borderPen = new Pen(selected ? Border : Color.FromArgb(38, Border));
+        e.Graphics.DrawRectangle(borderPen, bounds.Left, bounds.Top, bounds.Width - 1, bounds.Height - 1);
+
+        using var tabFont = new Font(Font.FontFamily, 9F, selected ? FontStyle.Bold : FontStyle.Regular);
+        TextRenderer.DrawText(
+            e.Graphics,
+            tabs.TabPages[e.Index].Text,
+            tabFont,
+            bounds,
+            selected ? TextColor : MutedText,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
     private Control BuildHeader()
     {
         var header = new TableLayoutPanel
@@ -157,13 +224,13 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             ColumnCount = 3,
             RowCount = 2,
-            Padding = new Padding(14, 10, 14, 10),
+            Padding = new Padding(16, 10, 16, 10),
             BackColor = HeaderBack
         };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 270));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 370));
-        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 430));
+        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var title = new Label
@@ -171,7 +238,7 @@ public sealed class MainForm : Form
             Text = "Custom Task Manager",
             Dock = DockStyle.Fill,
             ForeColor = TextColor,
-            Font = new Font(Font.FontFamily, 15F, FontStyle.Bold),
+            Font = new Font(Font.FontFamily, 17F, FontStyle.Bold),
             TextAlign = ContentAlignment.MiddleLeft
         };
         header.Controls.Add(title, 0, 0);
@@ -180,7 +247,8 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ForeColor = MutedText,
-            TextAlign = ContentAlignment.MiddleLeft
+            TextAlign = ContentAlignment.MiddleRight,
+            Font = new Font(Font.FontFamily, 9F)
         };
         header.Controls.Add(_summaryLabel, 1, 0);
         header.SetColumnSpan(_summaryLabel, 2);
@@ -189,10 +257,11 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             PlaceholderText = "Search process name, PID, or path",
-            BackColor = PanelBack,
+            BackColor = SurfaceBack,
             ForeColor = TextColor,
             BorderStyle = BorderStyle.FixedSingle,
-            Margin = new Padding(0, 8, 10, 0)
+            Margin = new Padding(0, 8, 10, 0),
+            Font = new Font(Font.FontFamily, 9.5F)
         };
         header.Controls.Add(_searchBox, 0, 1);
         header.SetColumnSpan(_searchBox, 2);
@@ -203,17 +272,20 @@ public sealed class MainForm : Form
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false,
             BackColor = HeaderBack,
-            Margin = new Padding(0, 4, 0, 0)
+            Padding = new Padding(0, 10, 0, 8),
+            Margin = new Padding(0)
         };
 
         _killButton = CreateButton("Kill", Danger);
-        _openLocationButton = CreateButton("Open location", Accent);
+        _openLocationButton = CreateButton("Open file", Accent);
+        _themeButton = CreateThemeButton();
         var refreshButton = CreateButton("Refresh", Accent);
-        refreshButton.Click += (_, _) => RefreshProcesses(manual: true);
+        refreshButton.Click += async (_, _) => await RefreshProcessesAsync(manual: true);
 
         actions.Controls.Add(_killButton);
         actions.Controls.Add(_openLocationButton);
         actions.Controls.Add(refreshButton);
+        actions.Controls.Add(_themeButton);
         header.Controls.Add(actions, 2, 1);
 
         return header;
@@ -222,10 +294,22 @@ public sealed class MainForm : Form
     private TabPage BuildProcessesTab()
     {
         var page = CreateTabPage("Processes");
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            RowCount = 2,
+            ColumnCount = 1,
+            BackColor = WindowBack,
+            Padding = new Padding(2)
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 88));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
         var split = new SplitContainer
         {
             Dock = DockStyle.Fill,
-            BackColor = Border
+            BackColor = Border,
+            SplitterWidth = 6
         };
         split.HandleCreated += (_, _) => BeginInvoke(() => ConfigureProcessSplitter(split));
         split.SizeChanged += (_, _) => ConfigureProcessSplitter(split);
@@ -233,29 +317,91 @@ public sealed class MainForm : Form
         _processTree = new TreeView
         {
             Dock = DockStyle.Fill,
-            BorderStyle = BorderStyle.None,
-            BackColor = PanelBack,
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = SurfaceBack,
             ForeColor = TextColor,
-            HideSelection = false
+            HideSelection = false,
+            FullRowSelect = true,
+            HotTracking = true,
+            Indent = 18,
+            ItemHeight = 27,
+            LineColor = Border,
+            Font = new Font("Segoe UI", 9.25F)
         };
         split.Panel1.Controls.Add(_processTree);
 
         _processGrid = CreateGrid();
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.Name), "Process", 190);
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.Id), "PID", 70);
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.ParentText), "Parent", 70);
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.CpuPercent), "CPU %", 80, "N1");
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.MemoryMb), "RAM MB", 90, "N1");
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.ThreadCount), "Threads", 75);
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.HandleCount), "Handles", 80);
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.Status), "Status", 120);
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.StartTimeText), "Started", 130);
-        AddTextColumn(_processGrid, nameof(ProcessSnapshot.Path), "Path", 360, autoFill: true);
+        AddTextColumns(_processGrid,
+            new(nameof(ProcessSnapshot.Name), "Process", 190),
+            new(nameof(ProcessSnapshot.Id), "PID", 70),
+            new(nameof(ProcessSnapshot.ParentText), "Parent", 70),
+            new(nameof(ProcessSnapshot.CpuPercent), "CPU %", 80, "N1"),
+            new(nameof(ProcessSnapshot.MemoryMb), "RAM MB", 90, "N1"),
+            new(nameof(ProcessSnapshot.ThreadCount), "Threads", 75),
+            new(nameof(ProcessSnapshot.HandleCount), "Handles", 80),
+            new(nameof(ProcessSnapshot.Status), "Status", 120),
+            new(nameof(ProcessSnapshot.StartTimeText), "Started", 130),
+            new(nameof(ProcessSnapshot.Path), "Path", 360, AutoFill: true));
         _processGrid.DataSource = _processSource;
         split.Panel2.Controls.Add(_processGrid);
 
-        page.Controls.Add(split);
+        layout.Controls.Add(BuildProcessAdvisorPanel(), 0, 0);
+        layout.Controls.Add(split, 0, 1);
+        page.Controls.Add(layout);
         return page;
+    }
+
+    private Control BuildProcessAdvisorPanel()
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            RowCount = 2,
+            ColumnCount = 2,
+            BackColor = SurfaceBack,
+            Padding = new Padding(14, 8, 14, 8),
+            Margin = new Padding(6, 2, 6, 8)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 164));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        panel.Paint += (_, args) =>
+        {
+            using var borderPen = new Pen(Border);
+            args.Graphics.DrawRectangle(borderPen, 0, 0, panel.Width - 1, panel.Height - 1);
+
+            using var accentBrush = new SolidBrush(Color.FromArgb(150, Accent));
+            args.Graphics.FillRectangle(accentBrush, 0, 0, 4, panel.Height);
+        };
+
+        _advisorTitleLabel = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "Smart RAM Advisor",
+            ForeColor = TextColor,
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true
+        };
+        _advisorDetailsLabel = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "Collecting process data...",
+            ForeColor = MutedText,
+            Font = new Font("Segoe UI", 9F),
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true
+        };
+        _selectAdvisorButton = CreateButton("Select suggestion", Accent);
+        _selectAdvisorButton.Dock = DockStyle.Fill;
+        _selectAdvisorButton.Enabled = false;
+
+        panel.Controls.Add(_advisorTitleLabel, 0, 0);
+        panel.Controls.Add(_advisorDetailsLabel, 0, 1);
+        panel.Controls.Add(_selectAdvisorButton, 1, 0);
+        panel.SetRowSpan(_selectAdvisorButton, 2);
+        return panel;
     }
 
     private static void ConfigureProcessSplitter(SplitContainer split)
@@ -281,9 +427,10 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             RowCount = 3,
             ColumnCount = 1,
-            BackColor = WindowBack
+            BackColor = WindowBack,
+            Padding = new Padding(2)
         };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 62));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
 
@@ -292,8 +439,9 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             RowCount = 1,
             ColumnCount = 2,
-            BackColor = WindowBack,
-            Padding = new Padding(8, 7, 8, 7)
+            BackColor = SurfaceBack,
+            Padding = new Padding(14, 9, 14, 9),
+            Margin = new Padding(6, 2, 6, 8)
         };
         dashboardBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         dashboardBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
@@ -304,7 +452,8 @@ public sealed class MainForm : Form
             Text = "Secure mobile dashboard starting...",
             ForeColor = MutedText,
             TextAlign = ContentAlignment.MiddleLeft,
-            AutoEllipsis = true
+            AutoEllipsis = true,
+            Font = new Font(Font.FontFamily, 9.25F)
         };
         _openDashboardButton = CreateButton("Open dashboard", Accent);
         _openDashboardButton.Dock = DockStyle.Fill;
@@ -314,62 +463,27 @@ public sealed class MainForm : Form
         dashboardBar.Controls.Add(_openDashboardButton, 1, 0);
         layout.Controls.Add(dashboardBar, 0, 0);
 
-        var graphLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            RowCount = 1,
-            ColumnCount = 2,
-            BackColor = WindowBack,
-            Padding = new Padding(2)
-        };
-        graphLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        graphLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-
-        _cpuGraph = new PerformanceGraph
-        {
-            Dock = DockStyle.Fill,
-            Caption = "CPU",
-            LineColor = Accent,
-            Margin = new Padding(6)
-        };
-        _memoryGraph = new PerformanceGraph
-        {
-            Dock = DockStyle.Fill,
-            Caption = "Memory",
-            LineColor = Color.FromArgb(233, 196, 106),
-            Margin = new Padding(6)
-        };
+        var graphLayout = CreateEvenGrid(3, 1, new Padding(1));
+        _cpuGraph = CreatePerformanceGraph("CPU", Accent);
+        _memoryGraph = CreatePerformanceGraph("Memory", Color.FromArgb(233, 196, 106));
+        _gpuGraph = CreatePerformanceGraph("GPU", Color.FromArgb(138, 111, 214));
         graphLayout.Controls.Add(_cpuGraph, 0, 0);
         graphLayout.Controls.Add(_memoryGraph, 1, 0);
+        graphLayout.Controls.Add(_gpuGraph, 2, 0);
         layout.Controls.Add(graphLayout, 0, 1);
 
-        var metricsLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            RowCount = 2,
-            ColumnCount = 5,
-            BackColor = WindowBack,
-            Padding = new Padding(2)
-        };
-
-        for (var column = 0; column < 5; column++)
-        {
-            metricsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
-        }
-
-        metricsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        metricsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-
-        metricsLayout.Controls.Add(CreateMetricCard("CPU", out _performanceCpuLabel), 0, 0);
-        metricsLayout.Controls.Add(CreateMetricCard("Memory", out _performanceMemoryLabel), 1, 0);
-        metricsLayout.Controls.Add(CreateMetricCard("Battery", out _performanceBatteryLabel), 2, 0);
-        metricsLayout.Controls.Add(CreateMetricCard("Power", out _performancePowerLabel), 3, 0);
-        metricsLayout.Controls.Add(CreateMetricCard("Processes", out _performanceProcessesLabel), 4, 0);
-        metricsLayout.Controls.Add(CreateMetricCard("Threads", out _performanceThreadsLabel), 0, 1);
-        metricsLayout.Controls.Add(CreateMetricCard("Handles", out _performanceHandlesLabel), 1, 1);
-        metricsLayout.Controls.Add(CreateMetricCard("Uptime", out _performanceUptimeLabel), 2, 1);
-        metricsLayout.Controls.Add(CreateMetricCard("Logical CPUs", out _performanceProcessorLabel), 3, 1);
-        metricsLayout.Controls.Add(CreateMetricCard("OS", out _performanceOsLabel), 4, 1);
+        var metricsLayout = CreateEvenGrid(6, 2, new Padding(1));
+        _performanceCpuLabel = AddMetricCard(metricsLayout, "CPU", 0, 0);
+        _performanceMemoryLabel = AddMetricCard(metricsLayout, "Memory", 1, 0);
+        _performanceGpuLabel = AddMetricCard(metricsLayout, "GPU", 2, 0);
+        _performanceBatteryLabel = AddMetricCard(metricsLayout, "Battery", 3, 0);
+        _performancePowerLabel = AddMetricCard(metricsLayout, "Power", 4, 0);
+        _performanceProcessesLabel = AddMetricCard(metricsLayout, "Processes", 5, 0);
+        _performanceThreadsLabel = AddMetricCard(metricsLayout, "Threads", 0, 1);
+        _performanceHandlesLabel = AddMetricCard(metricsLayout, "Handles", 1, 1);
+        _performanceUptimeLabel = AddMetricCard(metricsLayout, "Uptime", 2, 1);
+        _performanceProcessorLabel = AddMetricCard(metricsLayout, "Logical CPUs", 3, 1);
+        _performanceOsLabel = AddMetricCard(metricsLayout, "OS", 4, 1);
 
         layout.Controls.Add(metricsLayout, 0, 2);
         page.Controls.Add(layout);
@@ -379,15 +493,16 @@ public sealed class MainForm : Form
     private TabPage BuildStartupTab()
     {
         var page = CreateTabPage("Startup");
-        var layout = CreateTwoRowLayout(48);
+        var layout = CreateTwoRowLayout(62);
 
         var toolbar = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Padding = new Padding(10, 7, 10, 7),
-            BackColor = WindowBack
+            Padding = new Padding(12, 7, 12, 7),
+            BackColor = SurfaceBack,
+            Margin = new Padding(6, 2, 6, 8)
         };
 
         var refreshButton = CreateButton("Refresh", Accent);
@@ -398,11 +513,12 @@ public sealed class MainForm : Form
         layout.Controls.Add(toolbar, 0, 0);
 
         _startupGrid = CreateGrid();
-        AddTextColumn(_startupGrid, nameof(StartupEntry.Name), "Name", 190);
-        AddTextColumn(_startupGrid, nameof(StartupEntry.State), "State", 90);
-        AddTextColumn(_startupGrid, nameof(StartupEntry.Scope), "Scope", 140);
-        AddTextColumn(_startupGrid, nameof(StartupEntry.Command), "Command", 360);
-        AddTextColumn(_startupGrid, nameof(StartupEntry.RegistryPath), "Source", 320, autoFill: true);
+        AddTextColumns(_startupGrid,
+            new(nameof(StartupEntry.Name), "Name", 190),
+            new(nameof(StartupEntry.State), "State", 90),
+            new(nameof(StartupEntry.Scope), "Scope", 140),
+            new(nameof(StartupEntry.Command), "Command", 360),
+            new(nameof(StartupEntry.RegistryPath), "Source", 320, AutoFill: true));
         _startupGrid.DataSource = _startupSource;
         layout.Controls.Add(_startupGrid, 0, 1);
 
@@ -413,7 +529,7 @@ public sealed class MainForm : Form
     private TabPage BuildRulesTab()
     {
         var page = CreateTabPage("Rules");
-        var layout = CreateTwoRowLayout(86);
+        var layout = CreateTwoRowLayout(108);
 
         var editor = new FlowLayoutPanel
         {
@@ -421,7 +537,8 @@ public sealed class MainForm : Form
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = true,
             Padding = new Padding(10, 9, 10, 6),
-            BackColor = WindowBack,
+            BackColor = SurfaceBack,
+            Margin = new Padding(6, 2, 6, 8),
             AutoScroll = true
         };
 
@@ -437,7 +554,7 @@ public sealed class MainForm : Form
             DecimalPlaces = 1,
             Increment = 50,
             Width = 110,
-            BackColor = PanelBack,
+            BackColor = SurfaceBack,
             ForeColor = TextColor,
             Margin = new Padding(6, 4, 8, 4)
         };
@@ -473,11 +590,12 @@ public sealed class MainForm : Form
             Width = 52,
             ReadOnly = true
         });
-        AddTextColumn(_rulesGrid, nameof(AutomationRule.ProcessNameContains), "Process contains", 190);
-        AddTextColumn(_rulesGrid, nameof(AutomationRule.Metric), "Metric", 110);
-        AddTextColumn(_rulesGrid, nameof(AutomationRule.Threshold), "Threshold", 100, "N1");
-        AddTextColumn(_rulesGrid, nameof(AutomationRule.Action), "Action", 120);
-        AddTextColumn(_rulesGrid, nameof(AutomationRule.LastTriggeredText), "Last triggered", 150, autoFill: true);
+        AddTextColumns(_rulesGrid,
+            new(nameof(AutomationRule.ProcessNameContains), "Process contains", 190),
+            new(nameof(AutomationRule.Metric), "Metric", 110),
+            new(nameof(AutomationRule.Threshold), "Threshold", 100, "N1"),
+            new(nameof(AutomationRule.Action), "Action", 120),
+            new(nameof(AutomationRule.LastTriggeredText), "Last triggered", 150, AutoFill: true));
         layout.Controls.Add(_rulesGrid, 0, 1);
 
         page.Controls.Add(layout);
@@ -488,15 +606,16 @@ public sealed class MainForm : Form
     private TabPage BuildHistoryTab()
     {
         var page = CreateTabPage("History");
-        var layout = CreateTwoRowLayout(48);
+        var layout = CreateTwoRowLayout(62);
 
         var toolbar = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Padding = new Padding(10, 7, 10, 7),
-            BackColor = WindowBack
+            Padding = new Padding(12, 7, 12, 7),
+            BackColor = SurfaceBack,
+            Margin = new Padding(6, 2, 6, 8)
         };
 
         _historyWindowCombo = CreateComboBox(130);
@@ -510,11 +629,12 @@ public sealed class MainForm : Form
         layout.Controls.Add(toolbar, 0, 0);
 
         _historyGrid = CreateGrid();
-        AddTextColumn(_historyGrid, nameof(HistorySummary.Name), "Process", 220);
-        AddTextColumn(_historyGrid, nameof(HistorySummary.Samples), "Samples", 90);
-        AddTextColumn(_historyGrid, nameof(HistorySummary.AverageCpu), "Avg CPU %", 100, "N1");
-        AddTextColumn(_historyGrid, nameof(HistorySummary.AverageMemoryMb), "Avg RAM MB", 110, "N1");
-        AddTextColumn(_historyGrid, nameof(HistorySummary.MaxMemoryMb), "Max RAM MB", 120, "N1", autoFill: true);
+        AddTextColumns(_historyGrid,
+            new(nameof(HistorySummary.Name), "Process", 220),
+            new(nameof(HistorySummary.Samples), "Samples", 90),
+            new(nameof(HistorySummary.AverageCpu), "Avg CPU %", 100, "N1"),
+            new(nameof(HistorySummary.AverageMemoryMb), "Avg RAM MB", 110, "N1"),
+            new(nameof(HistorySummary.MaxMemoryMb), "Max RAM MB", 120, "N1", AutoFill: true));
         _historyGrid.DataSource = _historySource;
         layout.Controls.Add(_historyGrid, 0, 1);
 
@@ -541,7 +661,7 @@ public sealed class MainForm : Form
             RowCount = 3,
             ColumnCount = 1,
             BackColor = WindowBack,
-            Padding = new Padding(8)
+            Padding = new Padding(10)
         };
         chartPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         chartPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -560,7 +680,7 @@ public sealed class MainForm : Form
         _visualizationPieChart = new SystemPieChart
         {
             Dock = DockStyle.Fill,
-            BackColor = PanelBack,
+            BackColor = SurfaceBack,
             ForeColor = TextColor,
             MutedColor = MutedText,
             BorderColor = Border,
@@ -584,7 +704,7 @@ public sealed class MainForm : Form
             RowCount = 4,
             ColumnCount = 1,
             BackColor = WindowBack,
-            Padding = new Padding(8)
+            Padding = new Padding(10)
         };
         analysisPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
         analysisPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -596,7 +716,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             RowCount = 1,
             ColumnCount = 2,
-            BackColor = PanelBack,
+            BackColor = SurfaceBack,
             Padding = new Padding(14, 10, 14, 10),
             Margin = new Padding(0, 0, 0, 10)
         };
@@ -623,34 +743,23 @@ public sealed class MainForm : Form
         scorePanel.Controls.Add(_visualizationStatusLabel, 1, 0);
         analysisPanel.Controls.Add(scorePanel, 0, 0);
 
-        var metricGrid = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            RowCount = 3,
-            ColumnCount = 2,
-            BackColor = WindowBack
-        };
-        metricGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        metricGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        metricGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
-        metricGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
-        metricGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 33.34F));
-
-        metricGrid.Controls.Add(CreateMetricCard("CPU Load", out _visualizationCpuLabel), 0, 0);
-        metricGrid.Controls.Add(CreateMetricCard("GPU Load", out _visualizationGpuLabel), 1, 0);
-        metricGrid.Controls.Add(CreateMetricCard("Memory Load", out _visualizationMemoryLabel), 0, 1);
-        metricGrid.Controls.Add(CreateMetricCard("Battery Risk", out _visualizationBatteryLabel), 1, 1);
-        metricGrid.Controls.Add(CreateMetricCard("Process Load", out _visualizationProcessLabel), 0, 2);
+        var metricGrid = CreateEvenGrid(2, 3);
+        _visualizationCpuLabel = AddMetricCard(metricGrid, "CPU Load", 0, 0);
+        _visualizationGpuLabel = AddMetricCard(metricGrid, "GPU Load", 1, 0);
+        _visualizationMemoryLabel = AddMetricCard(metricGrid, "Memory Load", 0, 1);
+        _visualizationBatteryLabel = AddMetricCard(metricGrid, "Battery Risk", 1, 1);
+        _visualizationProcessLabel = AddMetricCard(metricGrid, "Process Load", 0, 2);
         analysisPanel.Controls.Add(metricGrid, 0, 1);
 
         _visualizationRecommendationLabel = new Label
         {
             Dock = DockStyle.Fill,
-            BackColor = PanelBack,
+            BackColor = SurfaceBack,
             ForeColor = TextColor,
             Padding = new Padding(14, 10, 14, 10),
             Text = "System recommendation will appear here.",
-            TextAlign = ContentAlignment.MiddleLeft
+            TextAlign = ContentAlignment.MiddleLeft,
+            BorderStyle = BorderStyle.FixedSingle
         };
         analysisPanel.Controls.Add(_visualizationRecommendationLabel, 0, 2);
 
@@ -670,10 +779,13 @@ public sealed class MainForm : Form
 
     private void WireEvents()
     {
-        _refreshTimer.Tick += (_, _) => RefreshProcesses();
+        _refreshTimer.Tick += async (_, _) => await RefreshProcessesAsync();
+        _themeAnimationTimer.Tick += (_, _) => AdvanceThemeToggleAnimation();
         _searchBox.TextChanged += (_, _) => ApplyProcessFilter();
-        _killButton.Click += (_, _) => KillSelectedProcess();
+        _killButton.Click += async (_, _) => await KillSelectedProcessAsync();
         _openLocationButton.Click += (_, _) => OpenSelectedProcessLocation();
+        _themeButton.Click += (_, _) => ToggleTheme();
+        _selectAdvisorButton.Click += (_, _) => SelectAdvisorRecommendation();
         _processGrid.SelectionChanged += (_, _) => UpdateProcessActionState();
         _processGrid.CellDoubleClick += (_, _) => OpenSelectedProcessLocation();
         _processTree.AfterSelect += (_, args) =>
@@ -688,11 +800,44 @@ public sealed class MainForm : Form
         _rulesGrid.SelectionChanged += (_, _) => LoadSelectedRuleIntoEditor();
         _historyWindowCombo.SelectedIndexChanged += (_, _) => RefreshHistory();
         _openDashboardButton.Click += (_, _) => OpenDashboard();
-        Shown += async (_, _) => await StartDashboardServerAsync();
-        FormClosing += async (_, _) => await _dashboardServer.DisposeAsync();
+        Shown += async (_, _) =>
+        {
+            await RefreshProcessesAsync();
+            await StartDashboardServerAsync();
+        };
+        FormClosing += async (_, _) =>
+        {
+            _themeAnimationTimer.Stop();
+            _themeAnimationTimer.Dispose();
+            _notifyIcon.Visible = false;
+            _notifyIcon.Dispose();
+            await _dashboardServer.DisposeAsync();
+        };
     }
 
-    private void RefreshProcesses(bool manual = false)
+    private void ConfigureNotifications()
+    {
+        _notifyIcon.Icon = SystemIcons.Application;
+        _notifyIcon.Text = "Custom Task Manager";
+        _notifyIcon.Visible = true;
+        _notifyIcon.BalloonTipClicked += (_, _) =>
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            if (WindowState == FormWindowState.Minimized)
+            {
+                WindowState = FormWindowState.Normal;
+            }
+
+            Show();
+            Activate();
+        };
+    }
+
+    private async Task RefreshProcessesAsync(bool manual = false)
     {
         if (_refreshingProcesses)
         {
@@ -704,10 +849,17 @@ public sealed class MainForm : Form
 
         try
         {
-            _snapshots = _processMonitor.Capture();
+            var snapshots = await Task.Run(_processMonitor.Capture);
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            _snapshots = snapshots;
             ApplyProcessFilter(selectedPid);
             RefreshProcessTree(selectedPid);
             UpdateSummary();
+            RefreshProcessAdvisor();
             RefreshPerformance();
             RunAutomationRules();
             AppendHistorySample();
@@ -755,6 +907,23 @@ public sealed class MainForm : Form
 
     private void RefreshProcessTree(int? selectedPid)
     {
+        var treeSignature = string.Join(
+            '|',
+            _snapshots
+                .OrderBy(snapshot => snapshot.Id)
+                .Select(snapshot => $"{snapshot.Id}:{snapshot.ParentId}:{snapshot.Name}"));
+
+        if (treeSignature == _processTreeSignature)
+        {
+            if (selectedPid is not null)
+            {
+                SelectTreeNode(selectedPid.Value);
+            }
+
+            return;
+        }
+
+        _processTreeSignature = treeSignature;
         _processTree.BeginUpdate();
         _processTree.Nodes.Clear();
 
@@ -826,6 +995,7 @@ public sealed class MainForm : Form
         _ruleStore.Save(_rules);
         _rulesSource.ResetBindings(false);
         SetStatus(messages[0]);
+        ShowDesktopNotification("Automation rule triggered", messages[0], ToolTipIcon.Warning);
     }
 
     private void AppendHistorySample()
@@ -851,6 +1021,30 @@ public sealed class MainForm : Form
         _summaryLabel.Text = $"Processes {_snapshots.Count:N0}    CPU {cpu:N1}%    RAM {memory:N0} MB    Updated {DateTime.Now:T}";
     }
 
+    private void RefreshProcessAdvisor()
+    {
+        var recommendations = _processAdvisor.RecommendMemoryClosures(_snapshots);
+        var topRecommendation = recommendations.FirstOrDefault();
+
+        if (topRecommendation is null)
+        {
+            _advisorTitleLabel.Text = "Smart RAM Advisor";
+            _advisorDetailsLabel.Text = "No safe high-memory app process found right now. Keep monitoring before closing anything.";
+            _selectAdvisorButton.Enabled = false;
+            return;
+        }
+
+        var shortList = string.Join(
+            "  |  ",
+            recommendations.Select(recommendation =>
+                $"{recommendation.ProcessName} ~{recommendation.EstimatedMemoryMb:N0} MB"));
+
+        _advisorTitleLabel.Text = $"Smart RAM Advisor: review {topRecommendation.ProcessName}";
+        _advisorDetailsLabel.Text =
+            $"{shortList}. Why: {topRecommendation.Reason}. {topRecommendation.SafetyNote}";
+        _selectAdvisorButton.Enabled = true;
+    }
+
     private void RefreshPerformance()
     {
         var snapshot = _performanceMonitor.Capture(_snapshots);
@@ -858,9 +1052,12 @@ public sealed class MainForm : Form
 
         _cpuGraph.AddValue(snapshot.CpuPercent);
         _memoryGraph.AddValue(snapshot.MemoryPercent);
+        _gpuGraph.ValueTextOverride = snapshot.Gpu.Summary;
+        _gpuGraph.AddValue(snapshot.Gpu.IsAvailable ? snapshot.Gpu.UsagePercent : 0);
 
         _performanceCpuLabel.Text = $"{snapshot.CpuPercent:N1}%";
         _performanceMemoryLabel.Text = $"{snapshot.MemoryUsedGb:N1} / {snapshot.MemoryTotalGb:N1} GB ({snapshot.MemoryPercent:N1}%)";
+        _performanceGpuLabel.Text = snapshot.Gpu.Summary;
         _performanceBatteryLabel.Text = snapshot.Battery.Summary;
         _performancePowerLabel.Text = FormatPowerStatus(snapshot.Battery);
         _performanceProcessesLabel.Text = snapshot.ProcessCount.ToString("N0");
@@ -871,6 +1068,57 @@ public sealed class MainForm : Form
         _performanceOsLabel.Text = snapshot.OsVersion.Replace("Microsoft Windows ", "Windows ");
 
         RefreshVisualization(snapshot);
+        EvaluateSmartAlerts(snapshot);
+    }
+
+    private void EvaluateSmartAlerts(PerformanceSnapshot snapshot)
+    {
+        _highCpuSamples = snapshot.CpuPercent >= SmartAlertCpuThreshold
+            ? Math.Min(_highCpuSamples + 1, SmartAlertRequiredSamples)
+            : 0;
+        _highMemorySamples = snapshot.MemoryPercent >= SmartAlertMemoryThreshold
+            ? Math.Min(_highMemorySamples + 1, SmartAlertRequiredSamples)
+            : 0;
+
+        if (DateTime.UtcNow - _lastSmartAlertUtc < SmartAlertCooldown)
+        {
+            return;
+        }
+
+        if (_highCpuSamples >= SmartAlertRequiredSamples)
+        {
+            var topCpu = _snapshots
+                .OrderByDescending(process => process.CpuPercent)
+                .FirstOrDefault();
+            var topText = topCpu is null
+                ? string.Empty
+                : $" Top CPU: {topCpu.Name} ({topCpu.CpuPercent:N1}%).";
+
+            ShowDesktopNotification(
+                "High CPU alert",
+                $"CPU stayed above {SmartAlertCpuThreshold:N0}% ({snapshot.CpuPercent:N1}%).{topText}",
+                ToolTipIcon.Warning);
+            SetStatus("Smart alert: sustained high CPU detected.");
+            _lastSmartAlertUtc = DateTime.UtcNow;
+            return;
+        }
+
+        if (_highMemorySamples >= SmartAlertRequiredSamples)
+        {
+            var topMemory = _snapshots
+                .OrderByDescending(process => process.MemoryMb)
+                .FirstOrDefault();
+            var topText = topMemory is null
+                ? string.Empty
+                : $" Top RAM: {topMemory.Name} ({topMemory.MemoryMb:N1} MB).";
+
+            ShowDesktopNotification(
+                "High memory alert",
+                $"Memory stayed above {SmartAlertMemoryThreshold:N0}% ({snapshot.MemoryPercent:N1}%).{topText}",
+                ToolTipIcon.Warning);
+            SetStatus("Smart alert: sustained high memory detected.");
+            _lastSmartAlertUtc = DateTime.UtcNow;
+        }
     }
 
     private void RefreshVisualization(PerformanceSnapshot snapshot)
@@ -1082,7 +1330,7 @@ public sealed class MainForm : Form
         });
     }
 
-    private void KillSelectedProcess()
+    private async Task KillSelectedProcessAsync()
     {
         var selected = SelectedProcess;
         if (selected is null)
@@ -1113,7 +1361,7 @@ public sealed class MainForm : Form
             using var process = Process.GetProcessById(selected.Id);
             process.Kill(entireProcessTree: true);
             SetStatus($"Killed {selected.Name} ({selected.Id}).");
-            RefreshProcesses();
+            await RefreshProcessesAsync();
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
         {
@@ -1256,12 +1504,35 @@ public sealed class MainForm : Form
         {
             _startupToggleButton.Enabled = true;
             _startupToggleButton.Text = entry.Enabled ? "Disable" : "Enable";
-            _startupToggleButton.BackColor = entry.Enabled ? Danger : Accent;
+            _startupToggleButton.Tag = entry.Enabled ? "danger" : "accent";
+            StyleButton(_startupToggleButton, entry.Enabled ? Danger : Accent);
             return;
         }
 
         _startupToggleButton.Enabled = false;
         _startupToggleButton.Text = "Disable";
+        _startupToggleButton.Tag = "accent";
+        StyleButton(_startupToggleButton, Accent);
+    }
+
+    private void SelectAdvisorRecommendation()
+    {
+        var recommendation = _processAdvisor.RecommendMemoryClosures(_snapshots).FirstOrDefault();
+        if (recommendation is null)
+        {
+            SetStatus("Smart RAM Advisor has no safe suggestion right now.");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_searchBox.Text))
+        {
+            _searchBox.Clear();
+        }
+
+        SelectProcessInGrid(recommendation.ProcessId);
+        SelectTreeNode(recommendation.ProcessId);
+        SetStatus(
+            $"Advisor selected {recommendation.ProcessName} ({recommendation.ProcessId}); review it, then use Kill only if safe.");
     }
 
     private ProcessSnapshot? SelectedProcess => _processSource.Current as ProcessSnapshot;
@@ -1346,6 +1617,27 @@ public sealed class MainForm : Form
         _statusLabel.Text = $"{DateTime.Now:T}  {message}";
     }
 
+    private void ShowDesktopNotification(string title, string message, ToolTipIcon icon)
+    {
+        if (IsDisposed || !_notifyIcon.Visible)
+        {
+            return;
+        }
+
+        _notifyIcon.BalloonTipTitle = title;
+        _notifyIcon.BalloonTipText = TrimNotificationText(message);
+        _notifyIcon.BalloonTipIcon = icon;
+        _notifyIcon.ShowBalloonTip(5000);
+    }
+
+    private static string TrimNotificationText(string message)
+    {
+        const int maximumBalloonTextLength = 255;
+        return message.Length <= maximumBalloonTextLength
+            ? message
+            : message[..(maximumBalloonTextLength - 3)] + "...";
+    }
+
     private static string FormatUptime(TimeSpan uptime)
     {
         return $"{(int)uptime.TotalDays}d {uptime.Hours}h {uptime.Minutes}m";
@@ -1367,6 +1659,235 @@ public sealed class MainForm : Form
         return $"{battery.PowerLineStatus}, {remaining.Hours}h {remaining.Minutes}m left";
     }
 
+    private void ToggleTheme()
+    {
+        var previousPalette = CapturePalette();
+        _isLightTheme = !_isLightTheme;
+        ApplyPalette(CreatePalette(_isLightTheme));
+
+        ApplyThemeToControl(this, previousPalette);
+        StyleThemeButton(_themeButton);
+        StartThemeToggleAnimation();
+        UpdateStartupActionState();
+
+        SetStatus($"{(_isLightTheme ? "Light" : "Dark")} theme applied.");
+        Invalidate(true);
+    }
+
+    private void StartThemeToggleAnimation()
+    {
+        _themeToggleTargetProgress = _isLightTheme ? 1F : 0F;
+        _themeAnimationTimer.Start();
+    }
+
+    private void AdvanceThemeToggleAnimation()
+    {
+        const float step = 0.08F;
+        var delta = _themeToggleTargetProgress - _themeToggleProgress;
+        if (Math.Abs(delta) <= step)
+        {
+            _themeToggleProgress = _themeToggleTargetProgress;
+            _themeAnimationTimer.Stop();
+        }
+        else
+        {
+            _themeToggleProgress += Math.Sign(delta) * step;
+        }
+
+        _themeButton.Invalidate();
+    }
+
+    private void ApplyThemeToControl(Control control, UiPalette previousPalette)
+    {
+        control.SuspendLayout();
+        control.BackColor = MapThemeColor(control.BackColor, previousPalette);
+        control.ForeColor = MapThemeColor(control.ForeColor, previousPalette);
+
+        switch (control)
+        {
+            case Button button:
+                if (button.Tag as string == "theme")
+                {
+                    StyleThemeButton(button);
+                }
+                else
+                {
+                    var buttonColor = button.Tag as string == "danger" ? Danger : Accent;
+                    StyleButton(button, buttonColor);
+                }
+                break;
+            case DataGridView grid:
+                ApplyGridTheme(grid);
+                break;
+            case PerformanceGraph graph:
+                graph.BackColor = SurfaceBack;
+                graph.ForeColor = TextColor;
+                graph.GridColor = Border;
+                graph.LineColor = MapThemeColor(graph.LineColor, previousPalette);
+                graph.Invalidate();
+                break;
+            case SystemPieChart pieChart:
+                pieChart.BackColor = SurfaceBack;
+                pieChart.ForeColor = TextColor;
+                pieChart.MutedColor = MutedText;
+                pieChart.BorderColor = Border;
+                pieChart.Invalidate();
+                break;
+            case TabControl tabControl:
+                tabControl.BackColor = WindowBack;
+                tabControl.Invalidate();
+                break;
+            case StatusStrip statusStrip:
+                statusStrip.BackColor = HeaderBack;
+                statusStrip.ForeColor = MutedText;
+                foreach (ToolStripItem item in statusStrip.Items)
+                {
+                    item.ForeColor = MutedText;
+                }
+                break;
+        }
+
+        foreach (Control child in control.Controls)
+        {
+            ApplyThemeToControl(child, previousPalette);
+        }
+
+        control.ResumeLayout();
+    }
+
+    private static UiPalette CapturePalette()
+    {
+        return new UiPalette(
+            WindowBack,
+            PanelBack,
+            SurfaceBack,
+            HeaderBack,
+            Border,
+            TextColor,
+            MutedText,
+            Accent,
+            AccentDark,
+            Danger,
+            GridAlternateBack);
+    }
+
+    private static UiPalette CreatePalette(bool lightTheme)
+    {
+        return lightTheme
+            ? new UiPalette(
+                Color.FromArgb(244, 247, 250),
+                Color.FromArgb(255, 255, 255),
+                Color.FromArgb(236, 241, 247),
+                Color.FromArgb(255, 255, 255),
+                Color.FromArgb(207, 216, 226),
+                Color.FromArgb(28, 38, 50),
+                Color.FromArgb(91, 103, 118),
+                Color.FromArgb(0, 145, 135),
+                Color.FromArgb(0, 118, 110),
+                Color.FromArgb(211, 68, 68),
+                Color.FromArgb(247, 249, 252))
+            : new UiPalette(
+                Color.FromArgb(14, 17, 21),
+                Color.FromArgb(23, 27, 33),
+                Color.FromArgb(30, 36, 44),
+                Color.FromArgb(19, 23, 29),
+                Color.FromArgb(55, 66, 80),
+                Color.FromArgb(242, 245, 248),
+                Color.FromArgb(154, 164, 177),
+                Color.FromArgb(0, 179, 167),
+                Color.FromArgb(20, 126, 119),
+                Color.FromArgb(224, 82, 82),
+                Color.FromArgb(27, 32, 39));
+    }
+
+    private static void ApplyPalette(UiPalette palette)
+    {
+        WindowBack = palette.WindowBack;
+        PanelBack = palette.PanelBack;
+        SurfaceBack = palette.SurfaceBack;
+        HeaderBack = palette.HeaderBack;
+        Border = palette.Border;
+        TextColor = palette.TextColor;
+        MutedText = palette.MutedText;
+        Accent = palette.Accent;
+        AccentDark = palette.AccentDark;
+        Danger = palette.Danger;
+        GridAlternateBack = palette.GridAlternateBack;
+    }
+
+    private static Color MapThemeColor(Color color, UiPalette previousPalette)
+    {
+        var argb = color.ToArgb();
+        if (argb == previousPalette.WindowBack.ToArgb()) return WindowBack;
+        if (argb == previousPalette.PanelBack.ToArgb()) return PanelBack;
+        if (argb == previousPalette.SurfaceBack.ToArgb()) return SurfaceBack;
+        if (argb == previousPalette.HeaderBack.ToArgb()) return HeaderBack;
+        if (argb == previousPalette.Border.ToArgb()) return Border;
+        if (argb == previousPalette.TextColor.ToArgb()) return TextColor;
+        if (argb == previousPalette.MutedText.ToArgb()) return MutedText;
+        if (argb == previousPalette.Accent.ToArgb()) return Accent;
+        if (argb == previousPalette.AccentDark.ToArgb()) return AccentDark;
+        if (argb == previousPalette.Danger.ToArgb()) return Danger;
+        if (argb == previousPalette.GridAlternateBack.ToArgb()) return GridAlternateBack;
+        return color;
+    }
+
+    private readonly record struct UiPalette(
+        Color WindowBack,
+        Color PanelBack,
+        Color SurfaceBack,
+        Color HeaderBack,
+        Color Border,
+        Color TextColor,
+        Color MutedText,
+        Color Accent,
+        Color AccentDark,
+        Color Danger,
+        Color GridAlternateBack);
+
+    private static PerformanceGraph CreatePerformanceGraph(string caption, Color lineColor)
+    {
+        return new PerformanceGraph
+        {
+            Dock = DockStyle.Fill,
+            Caption = caption,
+            LineColor = lineColor,
+            BackColor = SurfaceBack,
+            GridColor = Border,
+            Margin = new Padding(7)
+        };
+    }
+
+    private static TableLayoutPanel CreateEvenGrid(int columns, int rows, Padding? padding = null)
+    {
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            RowCount = rows,
+            ColumnCount = columns,
+            BackColor = WindowBack,
+            Padding = padding ?? Padding.Empty
+        };
+
+        for (var column = 0; column < columns; column++)
+        {
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / columns));
+        }
+
+        for (var row = 0; row < rows; row++)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F / rows));
+        }
+
+        return layout;
+    }
+
+    private static Label AddMetricCard(TableLayoutPanel layout, string title, int column, int row)
+    {
+        layout.Controls.Add(CreateMetricCard(title, out var label), column, row);
+        return label;
+    }
+
     private static Control CreateMetricCard(string title, out Label valueLabel)
     {
         var card = new TableLayoutPanel
@@ -1374,19 +1895,28 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             RowCount = 2,
             ColumnCount = 1,
-            BackColor = PanelBack,
-            Padding = new Padding(12, 8, 12, 8),
-            Margin = new Padding(6)
+            BackColor = SurfaceBack,
+            Padding = new Padding(14, 9, 14, 9),
+            Margin = new Padding(7)
         };
         card.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
         card.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        card.Paint += (_, args) =>
+        {
+            using var borderPen = new Pen(Border);
+            args.Graphics.DrawRectangle(borderPen, 0, 0, card.Width - 1, card.Height - 1);
+
+            using var accentBrush = new SolidBrush(Color.FromArgb(140, Accent));
+            args.Graphics.FillRectangle(accentBrush, 0, 0, 3, card.Height);
+        };
 
         var titleLabel = new Label
         {
             Dock = DockStyle.Fill,
             Text = title,
             ForeColor = MutedText,
-            TextAlign = ContentAlignment.MiddleLeft
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = new Font("Segoe UI", 8.75F, FontStyle.Bold)
         };
 
         valueLabel = new Label
@@ -1394,7 +1924,7 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Text = "-",
             ForeColor = TextColor,
-            Font = new Font("Segoe UI", 13F, FontStyle.Bold),
+            Font = new Font("Segoe UI", 12.5F, FontStyle.Bold),
             TextAlign = ContentAlignment.MiddleLeft,
             AutoEllipsis = true
         };
@@ -1410,7 +1940,7 @@ public sealed class MainForm : Form
         {
             BackColor = WindowBack,
             ForeColor = TextColor,
-            Padding = new Padding(8)
+            Padding = new Padding(10)
         };
     }
 
@@ -1421,7 +1951,8 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             RowCount = 2,
             ColumnCount = 1,
-            BackColor = WindowBack
+            BackColor = WindowBack,
+            Padding = new Padding(2)
         };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, topHeight));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -1441,24 +1972,60 @@ public sealed class MainForm : Form
             MultiSelect = false,
             SelectionMode = DataGridViewSelectionMode.FullRowSelect,
             RowHeadersVisible = false,
-            BorderStyle = BorderStyle.FixedSingle,
-            BackgroundColor = WindowBack,
+            BorderStyle = BorderStyle.None,
+            BackgroundColor = PanelBack,
             GridColor = Border,
-            EnableHeadersVisualStyles = false
+            EnableHeadersVisualStyles = false,
+            ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None,
+            CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
+            RowTemplate = { Height = 32 }
         };
 
+        ApplyGridTheme(grid);
+        return grid;
+    }
+
+    private static void ApplyGridTheme(DataGridView grid)
+    {
+        grid.BackgroundColor = PanelBack;
+        grid.GridColor = Border;
         grid.ColumnHeadersDefaultCellStyle.BackColor = HeaderBack;
         grid.ColumnHeadersDefaultCellStyle.ForeColor = TextColor;
         grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = HeaderBack;
         grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = TextColor;
+        grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+        grid.ColumnHeadersDefaultCellStyle.Padding = new Padding(8, 0, 8, 0);
+        grid.ColumnHeadersHeight = 36;
+        grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
         grid.DefaultCellStyle.BackColor = PanelBack;
         grid.DefaultCellStyle.ForeColor = TextColor;
-        grid.DefaultCellStyle.SelectionBackColor = Accent;
+        grid.DefaultCellStyle.SelectionBackColor = AccentDark;
         grid.DefaultCellStyle.SelectionForeColor = Color.White;
-        grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(33, 34, 38);
-        grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
-        grid.RowTemplate.Height = 28;
-        return grid;
+        grid.DefaultCellStyle.Padding = new Padding(8, 0, 8, 0);
+        grid.DefaultCellStyle.Font = new Font("Segoe UI", 9F);
+        grid.AlternatingRowsDefaultCellStyle.BackColor = GridAlternateBack;
+        grid.AlternatingRowsDefaultCellStyle.ForeColor = TextColor;
+    }
+
+    private readonly record struct GridColumn(
+        string PropertyName,
+        string HeaderText,
+        int Width,
+        string? Format = null,
+        bool AutoFill = false);
+
+    private static void AddTextColumns(DataGridView grid, params GridColumn[] columns)
+    {
+        foreach (var column in columns)
+        {
+            AddTextColumn(
+                grid,
+                column.PropertyName,
+                column.HeaderText,
+                column.Width,
+                column.Format,
+                column.AutoFill);
+        }
     }
 
     private static void AddTextColumn(
@@ -1492,19 +2059,306 @@ public sealed class MainForm : Form
 
     private static Button CreateButton(string text, Color backColor)
     {
+        var font = new Font("Segoe UI", 9F, FontStyle.Bold);
         var button = new Button
         {
             Text = text,
-            AutoSize = true,
-            Height = 31,
-            MinimumSize = new Size(78, 31),
+            AutoSize = false,
+            Height = 36,
+            Width = GetButtonWidth(text),
+            MinimumSize = new Size(82, 36),
             BackColor = backColor,
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Margin = new Padding(6, 2, 0, 2)
+            Cursor = Cursors.Hand,
+            Font = font,
+            Padding = new Padding(10, 0, 10, 0),
+            Margin = new Padding(6, 0, 0, 0),
+            TextAlign = ContentAlignment.MiddleCenter,
+            UseVisualStyleBackColor = false,
+            Tag = backColor.ToArgb() == Danger.ToArgb() ? "danger" : "accent"
         };
-        button.FlatAppearance.BorderColor = backColor;
+        StyleButton(button, backColor);
         return button;
+    }
+
+    private Button CreateThemeButton()
+    {
+        var button = new Button
+        {
+            AutoSize = false,
+            Width = ThemeToggleWidth,
+            Height = ThemeToggleHeight,
+            MinimumSize = new Size(ThemeToggleWidth, ThemeToggleHeight),
+            MaximumSize = new Size(ThemeToggleWidth, ThemeToggleHeight),
+            FlatStyle = FlatStyle.Flat,
+            Cursor = Cursors.Hand,
+            Margin = new Padding(8, 0, 0, 0),
+            Padding = Padding.Empty,
+            TextAlign = ContentAlignment.MiddleCenter,
+            UseVisualStyleBackColor = false,
+            Tag = "theme",
+            AccessibleName = "Theme toggle"
+        };
+
+        button.Resize += (_, _) => SetPillButtonRegion(button);
+        button.Paint += (_, args) =>
+        {
+            args.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            DrawThemeToggle(args.Graphics, button.ClientRectangle);
+        };
+
+        StyleThemeButton(button);
+        return button;
+    }
+
+    private static int GetButtonWidth(string text)
+    {
+        using var font = new Font("Segoe UI", 9F, FontStyle.Bold);
+        return Math.Max(82, TextRenderer.MeasureText(text, font).Width + 26);
+    }
+
+    private static void StyleButton(Button button, Color backColor)
+    {
+        button.BackColor = backColor;
+        button.ForeColor = Color.White;
+        button.FlatAppearance.BorderColor = backColor;
+        button.FlatAppearance.BorderSize = 0;
+        button.FlatAppearance.MouseOverBackColor = ControlPaint.Light(backColor, 0.12F);
+        button.FlatAppearance.MouseDownBackColor = ControlPaint.Dark(backColor, 0.08F);
+    }
+
+    private void StyleThemeButton(Button button)
+    {
+        button.Text = string.Empty;
+        button.BackColor = _isLightTheme ? Color.FromArgb(232, 232, 229) : Color.FromArgb(36, 39, 46);
+        button.ForeColor = _isLightTheme ? Color.White : Color.FromArgb(230, 231, 235);
+        button.AccessibleDescription = _isLightTheme ? "Switch to dark theme" : "Switch to light theme";
+        button.FlatAppearance.BorderSize = 0;
+        button.FlatAppearance.BorderColor = button.BackColor;
+        button.FlatAppearance.MouseOverBackColor = _isLightTheme
+            ? Color.FromArgb(244, 244, 241)
+            : Color.FromArgb(48, 52, 60);
+        button.FlatAppearance.MouseDownBackColor = _isLightTheme
+            ? Color.FromArgb(218, 218, 214)
+            : Color.FromArgb(28, 31, 37);
+        SetPillButtonRegion(button);
+        button.Invalidate();
+    }
+
+    private void DrawThemeToggle(Graphics graphics, Rectangle bounds)
+    {
+        graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        var progress = EaseThemeToggle(_themeToggleProgress);
+        var trackBounds = new RectangleF(1F, 1F, bounds.Width - 2F, bounds.Height - 2F);
+        var trackRadius = trackBounds.Height / 2F;
+        var trackTop = BlendColor(Color.FromArgb(28, 31, 37), Color.FromArgb(242, 242, 239), progress);
+        var trackBottom = BlendColor(Color.FromArgb(42, 45, 52), Color.FromArgb(220, 220, 216), progress);
+        var borderColor = BlendColor(Color.FromArgb(14, 16, 20), Color.FromArgb(205, 205, 201), progress);
+        var highlightColor = BlendColor(Color.FromArgb(70, 74, 82), Color.FromArgb(252, 252, 250), progress);
+
+        var shadowBounds = trackBounds;
+        shadowBounds.Offset(0F, 1.5F);
+        using (var shadowPath = CreateRoundedRectanglePath(shadowBounds, trackRadius))
+        using (var trackShadow = new SolidBrush(Color.FromArgb(50, Color.Black)))
+        {
+            graphics.FillPath(trackShadow, shadowPath);
+        }
+
+        trackBounds.Inflate(-1F, -1F);
+        trackRadius = trackBounds.Height / 2F;
+        using var buttonPath = CreateRoundedRectanglePath(trackBounds, trackRadius);
+        using var buttonBrush = new LinearGradientBrush(trackBounds, trackTop, trackBottom, LinearGradientMode.Vertical);
+        using var borderPen = new Pen(borderColor, 1.3F);
+        graphics.FillPath(buttonBrush, buttonPath);
+        graphics.DrawPath(borderPen, buttonPath);
+
+        var innerBounds = trackBounds;
+        innerBounds.Inflate(-3.5F, -3.5F);
+        using (var innerPath = CreateRoundedRectanglePath(innerBounds, innerBounds.Height / 2F))
+        using (var innerPen = new Pen(Color.FromArgb(155, highlightColor), 1F))
+        {
+            graphics.DrawPath(innerPen, innerPath);
+        }
+
+        var lightLabelAlpha = (int)Math.Round(235 * progress);
+        var darkLabelAlpha = (int)Math.Round(235 * (1F - progress));
+        DrawThemeLabel(
+            graphics,
+            new RectangleF(trackBounds.Left + 15F, trackBounds.Top + 5F, 74F, trackBounds.Height - 10F),
+            "LIGHT\nMODE",
+            Color.FromArgb(lightLabelAlpha, Color.White));
+        DrawThemeLabel(
+            graphics,
+            new RectangleF(trackBounds.Right - 82F, trackBounds.Top + 5F, 72F, trackBounds.Height - 10F),
+            "DARK\nMODE",
+            Color.FromArgb(darkLabelAlpha, Color.FromArgb(151, 153, 160)));
+
+        var knobSize = trackBounds.Height - 7F;
+        var knobTravel = trackBounds.Width - knobSize - 10F;
+        var knobX = trackBounds.Left + 5F + knobTravel * progress;
+        var knobBounds = new RectangleF(knobX, trackBounds.Top + 3.5F, knobSize, knobSize);
+        var shadowAlpha = (int)Math.Round(90 - 26 * progress);
+        using var shadowBrush = new SolidBrush(Color.FromArgb(shadowAlpha, Color.Black));
+        graphics.FillEllipse(shadowBrush, knobBounds.Left + 2.4F, knobBounds.Top + 2.7F, knobBounds.Width, knobBounds.Height);
+
+        var knobTop = BlendColor(Color.FromArgb(255, 255, 255), Color.FromArgb(248, 248, 246), progress);
+        var knobBottom = BlendColor(Color.FromArgb(235, 237, 241), Color.FromArgb(224, 224, 220), progress);
+        var knobFill = BlendColor(knobTop, knobBottom, 0.42F);
+        var knobBorder = BlendColor(Color.FromArgb(216, 219, 224), Color.FromArgb(199, 199, 194), progress);
+        using var knobBrush = new LinearGradientBrush(knobBounds, knobTop, knobBottom, LinearGradientMode.Vertical);
+        using var knobBorderPen = new Pen(knobBorder, 1.3F);
+        graphics.FillEllipse(knobBrush, knobBounds);
+        graphics.DrawEllipse(knobBorderPen, knobBounds);
+
+        var knobHighlight = knobBounds;
+        knobHighlight.Inflate(-4F, -4F);
+        using (var highlightPen = new Pen(Color.FromArgb(130, Color.White), 1F))
+        {
+            graphics.DrawArc(highlightPen, knobHighlight, 205F, 125F);
+        }
+
+        var iconBounds = knobBounds;
+        iconBounds.Inflate(-6.1F, -6.1F);
+        var moonAlpha = (int)Math.Round(255 * (1F - progress));
+        var sunAlpha = (int)Math.Round(255 * progress);
+
+        var graphicsState = graphics.Save();
+        graphics.SetClip(knobBounds, CombineMode.Intersect);
+        if (moonAlpha > 0)
+        {
+            DrawMoonIcon(
+                graphics,
+                iconBounds,
+                Color.FromArgb(moonAlpha, Color.FromArgb(32, 36, 43)),
+                knobFill);
+        }
+
+        if (sunAlpha > 0)
+        {
+            DrawSunIcon(
+                graphics,
+                iconBounds,
+                Color.FromArgb(sunAlpha, Color.FromArgb(172, 172, 174)),
+                0.9F + 0.1F * progress,
+                -40F * (1F - progress));
+        }
+
+        graphics.Restore(graphicsState);
+    }
+
+    private static void DrawThemeLabel(Graphics graphics, RectangleF bounds, string text, Color color)
+    {
+        if (color.A <= 0)
+        {
+            return;
+        }
+
+        using var labelFont = new Font("Segoe UI", 10.8F, FontStyle.Bold);
+        using var labelBrush = new SolidBrush(color);
+        using var labelFormat = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter
+        };
+        graphics.DrawString(text, labelFont, labelBrush, bounds, labelFormat);
+    }
+
+    private static float EaseThemeToggle(float progress)
+    {
+        progress = Math.Clamp(progress, 0F, 1F);
+        return progress * progress * (3F - 2F * progress);
+    }
+
+    private static Color BlendColor(Color from, Color to, float progress)
+    {
+        progress = Math.Clamp(progress, 0F, 1F);
+        return Color.FromArgb(
+            (int)Math.Round(from.A + (to.A - from.A) * progress),
+            (int)Math.Round(from.R + (to.R - from.R) * progress),
+            (int)Math.Round(from.G + (to.G - from.G) * progress),
+            (int)Math.Round(from.B + (to.B - from.B) * progress));
+    }
+
+    private static void DrawSunIcon(Graphics graphics, RectangleF bounds, Color iconColor, float scale, float rotationDegrees)
+    {
+        var center = new PointF(bounds.Left + bounds.Width / 2F, bounds.Top + bounds.Height / 2F);
+        var graphicsState = graphics.Save();
+        graphics.TranslateTransform(center.X, center.Y);
+        graphics.RotateTransform(rotationDegrees);
+        graphics.ScaleTransform(scale, scale);
+
+        using var rayPen = new Pen(iconColor, 2.1F)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round
+        };
+        using var coreBrush = new SolidBrush(iconColor);
+
+        for (var index = 0; index < 8; index++)
+        {
+            var angle = Math.PI * 2 * index / 8;
+            var inner = new PointF(
+                (float)Math.Cos(angle) * 8.5F,
+                (float)Math.Sin(angle) * 8.5F);
+            var outer = new PointF(
+                (float)Math.Cos(angle) * 13F,
+                (float)Math.Sin(angle) * 13F);
+            graphics.DrawLine(rayPen, inner, outer);
+        }
+
+        graphics.FillEllipse(coreBrush, -6.2F, -6.2F, 12.4F, 12.4F);
+        graphics.Restore(graphicsState);
+    }
+
+    private static void DrawMoonIcon(Graphics graphics, RectangleF bounds, Color iconColor, Color backgroundColor)
+    {
+        var center = new PointF(bounds.Left + bounds.Width / 2F, bounds.Top + bounds.Height / 2F);
+        using var moonBrush = new SolidBrush(iconColor);
+        using var cutBrush = new SolidBrush(backgroundColor);
+        using var starBrush = new SolidBrush(iconColor);
+
+        graphics.FillEllipse(moonBrush, center.X - 9.5F, center.Y - 9.5F, 19F, 19F);
+        graphics.FillEllipse(cutBrush, center.X - 12.6F, center.Y - 9.5F, 19F, 19F);
+        graphics.FillPolygon(starBrush, CreateFourPointStar(center.X + 8.5F, center.Y - 7.2F, 3.8F));
+        graphics.FillPolygon(starBrush, CreateFourPointStar(center.X + 12.7F, center.Y - 0.5F, 2.8F));
+    }
+
+    private static PointF[] CreateFourPointStar(float centerX, float centerY, float radius)
+    {
+        return
+        [
+            new PointF(centerX, centerY - radius),
+            new PointF(centerX + radius * 0.32F, centerY - radius * 0.32F),
+            new PointF(centerX + radius, centerY),
+            new PointF(centerX + radius * 0.32F, centerY + radius * 0.32F),
+            new PointF(centerX, centerY + radius),
+            new PointF(centerX - radius * 0.32F, centerY + radius * 0.32F),
+            new PointF(centerX - radius, centerY),
+            new PointF(centerX - radius * 0.32F, centerY - radius * 0.32F)
+        ];
+    }
+
+    private static void SetPillButtonRegion(Button button)
+    {
+        button.Region?.Dispose();
+        using var path = CreateRoundedRectanglePath(
+            new RectangleF(0, 0, button.Width - 1, button.Height - 1),
+            (button.Height - 1) / 2F);
+        button.Region = new Region(path);
+    }
+
+    private static GraphicsPath CreateRoundedRectanglePath(RectangleF bounds, float radius)
+    {
+        var diameter = radius * 2F;
+        var path = new GraphicsPath();
+        path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 
     private static TextBox CreateTextBox(string placeholder, int width)
@@ -1513,9 +2367,10 @@ public sealed class MainForm : Form
         {
             Width = width,
             PlaceholderText = placeholder,
-            BackColor = PanelBack,
+            BackColor = SurfaceBack,
             ForeColor = TextColor,
             BorderStyle = BorderStyle.FixedSingle,
+            Font = new Font("Segoe UI", 9.25F),
             Margin = new Padding(6, 5, 8, 4)
         };
     }
@@ -1526,9 +2381,10 @@ public sealed class MainForm : Form
         {
             Width = width,
             DropDownStyle = ComboBoxStyle.DropDownList,
-            BackColor = PanelBack,
+            BackColor = SurfaceBack,
             ForeColor = TextColor,
             FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9.25F),
             Margin = new Padding(6, 4, 8, 4)
         };
     }
@@ -1540,6 +2396,7 @@ public sealed class MainForm : Form
             Text = text,
             AutoSize = true,
             ForeColor = TextColor,
+            Font = new Font("Segoe UI", 9.25F),
             Margin = new Padding(6, 7, 10, 4)
         };
     }

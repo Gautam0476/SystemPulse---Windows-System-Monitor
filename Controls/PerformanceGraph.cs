@@ -1,17 +1,20 @@
+using System.Drawing.Drawing2D;
+
 namespace CustomTaskManager.Controls;
 
 public sealed class PerformanceGraph : Control
 {
     private readonly Queue<double> _values = new();
+    private string? _valueTextOverride;
 
     public PerformanceGraph()
     {
         DoubleBuffered = true;
         SetStyle(ControlStyles.ResizeRedraw, true);
-        BackColor = Color.FromArgb(28, 29, 32);
-        ForeColor = Color.FromArgb(238, 239, 241);
-        LineColor = Color.FromArgb(42, 157, 143);
-        GridColor = Color.FromArgb(55, 57, 62);
+        BackColor = Color.FromArgb(30, 36, 44);
+        ForeColor = Color.FromArgb(242, 245, 248);
+        LineColor = Color.FromArgb(0, 179, 167);
+        GridColor = Color.FromArgb(55, 66, 80);
         Caption = "Usage";
     }
 
@@ -24,6 +27,21 @@ public sealed class PerformanceGraph : Control
     public int MaxSamples { get; set; } = 60;
 
     public double LatestValue => _values.Count == 0 ? 0 : _values.Last();
+
+    public string? ValueTextOverride
+    {
+        get => _valueTextOverride;
+        set
+        {
+            if (_valueTextOverride == value)
+            {
+                return;
+            }
+
+            _valueTextOverride = value;
+            Invalidate();
+        }
+    }
 
     public void AddValue(double value)
     {
@@ -42,15 +60,17 @@ public sealed class PerformanceGraph : Control
         base.OnPaint(e);
 
         var graphics = e.Graphics;
-        graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
 
         using var backBrush = new SolidBrush(BackColor);
         graphics.FillRectangle(backBrush, ClientRectangle);
+        using var outerBorderPen = new Pen(GridColor);
+        graphics.DrawRectangle(outerBorderPen, 0, 0, Math.Max(0, Width - 1), Math.Max(0, Height - 1));
 
-        var chartBounds = new Rectangle(14, 38, Math.Max(20, Width - 28), Math.Max(20, Height - 54));
+        var chartBounds = new Rectangle(16, 42, Math.Max(20, Width - 32), Math.Max(20, Height - 60));
 
-        using var borderPen = new Pen(GridColor);
-        using var gridPen = new Pen(Color.FromArgb(42, GridColor), 1);
+        using var borderPen = new Pen(Color.FromArgb(150, GridColor));
+        using var gridPen = new Pen(Color.FromArgb(34, GridColor), 1);
         for (var row = 0; row <= 4; row++)
         {
             var y = chartBounds.Top + row * chartBounds.Height / 4;
@@ -70,10 +90,10 @@ public sealed class PerformanceGraph : Control
         using var captionFont = new Font(Font.FontFamily, 9F, FontStyle.Bold);
         using var valueFont = new Font(Font.FontFamily, 16F, FontStyle.Bold);
 
-        graphics.DrawString(Caption, captionFont, captionBrush, 12, 10);
-        var valueText = $"{LatestValue:N1}%";
+        graphics.DrawString(Caption, captionFont, captionBrush, 14, 12);
+        var valueText = ValueTextOverride ?? $"{LatestValue:N1}%";
         var valueSize = graphics.MeasureString(valueText, valueFont);
-        graphics.DrawString(valueText, valueFont, valueBrush, Width - valueSize.Width - 12, 6);
+        graphics.DrawString(valueText, valueFont, valueBrush, Width - valueSize.Width - 14, 8);
 
         if (_values.Count < 2)
         {
@@ -89,7 +109,29 @@ public sealed class PerformanceGraph : Control
             points[index] = new PointF(x, y);
         }
 
+        using var areaPath = new GraphicsPath();
+        areaPath.AddLines(points);
+        areaPath.AddLine(points[^1], new PointF(points[^1].X, chartBounds.Bottom));
+        areaPath.AddLine(new PointF(points[0].X, chartBounds.Bottom), new PointF(points[0].X, points[0].Y));
+        areaPath.CloseFigure();
+        using var areaBrush = new LinearGradientBrush(
+            chartBounds,
+            Color.FromArgb(74, LineColor),
+            Color.FromArgb(8, LineColor),
+            LinearGradientMode.Vertical);
+        graphics.FillPath(areaBrush, areaPath);
+
+        using var glowPen = new Pen(Color.FromArgb(70, LineColor), 5F)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round,
+            LineJoin = LineJoin.Round
+        };
         using var linePen = new Pen(LineColor, 2.3F);
+        linePen.StartCap = LineCap.Round;
+        linePen.EndCap = LineCap.Round;
+        linePen.LineJoin = LineJoin.Round;
+        graphics.DrawLines(glowPen, points);
         graphics.DrawLines(linePen, points);
     }
 }
